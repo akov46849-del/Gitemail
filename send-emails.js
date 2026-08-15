@@ -1,15 +1,21 @@
+const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
-const axios = require('axios');
 
-// Читаем секреты из переменных окружения (GitHub Secrets)
+// === Инициализация Firebase Admin SDK ===
+// Читаем сервисный аккаунт из GitHub Secrets
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+    databaseURL: 'https://zing-4a547-default-rtdb.europe-west1.firebasedatabase.app/'
+});
+const db = admin.database();
+
+// === Настройки SMTP (Brevo) ===
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = parseInt(process.env.SMTP_PORT) || 587;
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASSWORD = process.env.SMTP_PASSWORD;
 const FROM_EMAIL = process.env.FROM_EMAIL || SMTP_USER;
-
-// ВАШ URL БАЗЫ ДАННЫХ FIREBASE (уже вставлен)
-const FIREBASE_DATABASE_URL = 'https://zing-4a547-default-rtdb.europe-west1.firebasedatabase.app/';
 
 // Создаём транспорт для отправки писем
 const transporter = nodemailer.createTransport({
@@ -22,12 +28,12 @@ const transporter = nodemailer.createTransport({
     },
 });
 
-// Генерация 6-значного кода
+// === Генерация 6-значного кода ===
 function generateCode() {
     return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// Отправка одного письма
+// === Отправка одного письма ===
 async function sendCodeEmail(toEmail, code) {
     const html = `
         <h1>Ваш код для входа в ZING</h1>
@@ -56,15 +62,15 @@ async function sendCodeEmail(toEmail, code) {
     }
 }
 
-// Главная функция: читает очередь из Firebase и отправляет письма
+// === Главная функция: обработка очереди ===
 async function processQueue() {
     console.log('🚀 Начинаем обработку очереди...');
 
     try {
         // Читаем все записи из /emailQueue
-        const url = `${FIREBASE_DATABASE_URL}/emailQueue.json`;
-        const response = await axios.get(url);
-        const queue = response.data;
+        const ref = db.ref('emailQueue');
+        const snapshot = await ref.once('value');
+        const queue = snapshot.val();
 
         if (!queue) {
             console.log('📭 Очередь пуста.');
@@ -89,8 +95,8 @@ async function processQueue() {
             const code = generateCode();
 
             // Сохраняем код в Firebase (для проверки на клиенте)
-            const codeRef = `${FIREBASE_DATABASE_URL}/codes/${email.replace(/\./g, '_')}.json`;
-            await axios.put(codeRef, {
+            const codeRef = db.ref('codes').child(email.replace(/\./g, '_'));
+            await codeRef.set({
                 code: code,
                 createdAt: Date.now()
             });
@@ -100,8 +106,7 @@ async function processQueue() {
 
             if (success) {
                 // Помечаем запрос как обработанный
-                const updateUrl = `${FIREBASE_DATABASE_URL}/emailQueue/${key}.json`;
-                await axios.patch(updateUrl, { status: 'sent' });
+                await ref.child(key).update({ status: 'sent' });
                 console.log(`✅ Обработан запрос для ${email}`);
             } else {
                 console.log(`⚠️ Ошибка отправки для ${email}, оставляем в очереди.`);
@@ -115,5 +120,5 @@ async function processQueue() {
     }
 }
 
-// Запуск
+// === Запуск ===
 processQueue();
