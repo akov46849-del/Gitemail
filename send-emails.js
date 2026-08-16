@@ -1,6 +1,10 @@
 const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
 
+// === Ограничение времени работы (6 часов) ===
+const MAX_RUNTIME = 6 * 60 * 60 * 1000; // 6 часов в миллисекундах
+const startTime = Date.now();
+
 // === Инициализация Firebase Admin SDK ===
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({
@@ -23,7 +27,7 @@ const transporter = nodemailer.createTransport({
     auth: { user: SMTP_USER, pass: SMTP_PASSWORD },
 });
 
-// === Генерация кода ===
+// === Генерация 6-значного кода ===
 function generateCode() {
     return Math.floor(100000 + Math.random() * 900000).toString();
 }
@@ -35,6 +39,7 @@ async function sendCodeEmail(toEmail, code) {
         <p>Введите этот код на странице входа:</p>
         <h2 style="background: #f0f0f0; padding: 20px; border-radius: 10px; font-size: 36px; text-align: center;">${code}</h2>
         <p>Код действителен 10 минут.</p>
+        <p><strong>Если письмо не пришло, проверьте папку «Спам» или «Рассылки».</strong></p>
         <p>Если вы не запрашивали вход, проигнорируйте это письмо.</p>
         <br><p>С уважением, команда ZING</p>
     `;
@@ -44,7 +49,7 @@ async function sendCodeEmail(toEmail, code) {
         to: toEmail,
         subject: 'Код для входа в ZING',
         html: html,
-        text: `Ваш код для входа в ZING: ${code}. Код действителен 10 минут.`
+        text: `Ваш код для входа в ZING: ${code}. Код действителен 10 минут. Если письмо не пришло, проверьте папку «Спам» или «Рассылки».`
     };
 
     try {
@@ -62,11 +67,18 @@ async function processQueue() {
     console.log('🚀 Запущен процесс обработки очереди (каждые 10 секунд)');
     console.log(`📧 Отправитель: ${FROM_EMAIL}`);
     console.log(`🔗 База данных: ${admin.app().options.databaseURL}`);
+    console.log(`⏳ Максимальное время работы: 6 часов`);
     console.log('-----------------------------------');
 
     let totalSent = 0;
 
     while (true) {
+        // Проверяем, не истекло ли время работы
+        if (Date.now() - startTime > MAX_RUNTIME) {
+            console.log('⏰ 6 часов прошло. Завершаем работу для перезапуска.');
+            process.exit(0);
+        }
+
         try {
             const ref = db.ref('emailQueue');
             const snapshot = await ref.once('value');
@@ -85,7 +97,7 @@ async function processQueue() {
                         // Генерируем код
                         const code = generateCode();
 
-                        // Сохраняем код в Firebase
+                        // Сохраняем код в Firebase (для проверки на клиенте)
                         const codeRef = db.ref('codes').child(email.replace(/\./g, '_'));
                         await codeRef.set({
                             code: code,
