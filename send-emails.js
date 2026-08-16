@@ -2,7 +2,6 @@ const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
 
 // === Инициализация Firebase Admin SDK ===
-// Читаем сервисный аккаунт из GitHub Secrets
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -17,23 +16,19 @@ const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASSWORD = process.env.SMTP_PASSWORD;
 const FROM_EMAIL = process.env.FROM_EMAIL || SMTP_USER;
 
-// Создаём транспорт для отправки писем
 const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
     secure: false,
-    auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASSWORD,
-    },
+    auth: { user: SMTP_USER, pass: SMTP_PASSWORD },
 });
 
-// === Генерация 6-значного кода ===
+// === Генерация кода ===
 function generateCode() {
     return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// === Отправка одного письма ===
+// === Отправка письма ===
 async function sendCodeEmail(toEmail, code) {
     const html = `
         <h1>Ваш код для входа в ZING</h1>
@@ -57,68 +52,72 @@ async function sendCodeEmail(toEmail, code) {
         console.log(`✅ Письмо отправлено на ${toEmail}`);
         return true;
     } catch (error) {
-        console.error(`❌ Ошибка отправки на ${toEmail}:`, error);
+        console.error(`❌ Ошибка отправки на ${toEmail}:`, error.message);
         return false;
     }
 }
 
-// === Главная функция: обработка очереди ===
+// === БЕСКОНЕЧНЫЙ ЦИКЛ ПРОВЕРКИ (каждые 10 секунд) ===
 async function processQueue() {
-    console.log('🚀 Начинаем обработку очереди...');
+    console.log('🚀 Запущен процесс обработки очереди (каждые 10 секунд)');
+    console.log(`📧 Отправитель: ${FROM_EMAIL}`);
+    console.log(`🔗 База данных: ${admin.app().options.databaseURL}`);
+    console.log('-----------------------------------');
 
-    try {
-        // Читаем все записи из /emailQueue
-        const ref = db.ref('emailQueue');
-        const snapshot = await ref.once('value');
-        const queue = snapshot.val();
+    let totalSent = 0;
 
-        if (!queue) {
-            console.log('📭 Очередь пуста.');
-            return;
-        }
+    while (true) {
+        try {
+            const ref = db.ref('emailQueue');
+            const snapshot = await ref.once('value');
+            const queue = snapshot.val();
 
-        // Фильтруем только те, у которых status = 'pending'
-        const entries = Object.entries(queue).filter(([key, value]) => value.status === 'pending');
+            if (queue) {
+                const entries = Object.entries(queue).filter(([key, value]) => value.status === 'pending');
 
-        if (entries.length === 0) {
-            console.log('📭 Нет новых запросов.');
-            return;
-        }
+                if (entries.length > 0) {
+                    console.log(`📬 Найдено ${entries.length} запросов. Обработка...`);
 
-        console.log(`📬 Найдено ${entries.length} запросов.`);
+                    for (const [key, request] of entries) {
+                        const email = request.email;
+                        if (!email) continue;
 
-        for (const [key, request] of entries) {
-            const email = request.email;
-            if (!email) continue;
+                        // Генерируем код
+                        const code = generateCode();
 
-            // Генерируем код
-            const code = generateCode();
+                        // Сохраняем код в Firebase
+                        const codeRef = db.ref('codes').child(email.replace(/\./g, '_'));
+                        await codeRef.set({
+                            code: code,
+                            createdAt: Date.now()
+                        });
 
-            // Сохраняем код в Firebase (для проверки на клиенте)
-            const codeRef = db.ref('codes').child(email.replace(/\./g, '_'));
-            await codeRef.set({
-                code: code,
-                createdAt: Date.now()
-            });
+                        // Отправляем письмо
+                        const success = await sendCodeEmail(email, code);
 
-            // Отправляем письмо
-            const success = await sendCodeEmail(email, code);
-
-            if (success) {
-                // Помечаем запрос как обработанный
-                await ref.child(key).update({ status: 'sent' });
-                console.log(`✅ Обработан запрос для ${email}`);
-            } else {
-                console.log(`⚠️ Ошибка отправки для ${email}, оставляем в очереди.`);
+                        if (success) {
+                            await ref.child(key).update({ status: 'sent' });
+                            console.log(`✅ Обработан запрос для ${email}`);
+                            totalSent++;
+                        } else {
+                            console.log(`⚠️ Ошибка отправки для ${email}, оставляем в очереди.`);
+                        }
+                    }
+                }
             }
-        }
 
-        console.log('🏁 Обработка завершена.');
-    } catch (error) {
-        console.error('❌ Критическая ошибка:', error);
-        process.exit(1);
+            // Ждём 10 секунд перед следующей проверкой
+            await new Promise(resolve => setTimeout(resolve, 10000));
+        } catch (error) {
+            console.error('❌ Ошибка в цикле:', error.message);
+            // Не прерываем цикл, продолжаем
+            await new Promise(resolve => setTimeout(resolve, 10000));
+        }
     }
 }
 
-// === Запуск ===
-processQueue();
+// === ЗАПУСК ===
+processQueue().catch(error => {
+    console.error('❌ Критическая ошибка:', error);
+    process.exit(1);
+});
